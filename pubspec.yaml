@@ -68,7 +68,7 @@ flutter:
 
   assets:
     - assets/images/
-
+    - assets/images/zeynep_logo.jpg
   # The following line ensures that the Material Icons font is
   # included with your application. By default, the Material Icons font is
   # included with your application.

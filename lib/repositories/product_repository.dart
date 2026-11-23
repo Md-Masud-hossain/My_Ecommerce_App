@@ -1,37 +1,44 @@
+import 'dart:convert';
+
+import 'package:ecommerce_app/config.dart';
 import 'package:ecommerce_app/models/product_model.dart';
+import 'package:http/http.dart' as http;
 
 class ProductRepository {
-  Future<List<Product>> getProducts() async {
-    return [
-      Product("Half Slim T-Shirt", 500, "assets/images/t-shirt.jpg", "Zeynep"),
-      Product("Running Shoes", 1500, "assets/images/shoes.jpg", "Lotto"),
+  // Same method name as before, so ProductBloc needs no changes.
+  Future<List<Product>> getProducts({
+    String query = '',
+    int? categoryId,
+  }) async {
+    final params = <String, String>{
+      if (query.isNotEmpty) 'q': query,
+      if (categoryId != null) 'category_id': '$categoryId',
+    };
 
-      Product("Rolex Watch", 1800, "assets/images/watch.jpg", "Rolex"),
+    var uri = Uri.parse('${Config.apiBase}/get_products.php');
+    if (params.isNotEmpty) uri = uri.replace(queryParameters: params);
 
-      Product("Joyroom Airbuds", 3100, "assets/images/airbuds.jpg", "Joyroom"),
+    final res = await http.get(uri).timeout(const Duration(seconds: 15));
+    final data = jsonDecode(res.body);
 
-      Product(
-        "Custom fit shirt",
-        999,
-        "assets/images/Custom-fit shirt.jpg",
-        "Zeynep",
-      ),
+    if (res.statusCode != 200 || data['ok'] != true) {
+      throw Exception(data['message'] ?? 'Could not load products');
+    }
 
-      Product(
-        "Formal check shirt",
-        998,
-        "assets/images/Formal Check Shirt.jpg",
-        "Zeynep",
-      ),
+    return (data['products'] as List)
+        .map((e) => Product.fromJson(Map<String, dynamic>.from(e)))
+        .toList();
+  }
 
-      Product(
-        "Mens green solid slim fit shirt",
-        1250,
-        "assets/images/Mens green solid slim fit.jpg",
-        "Zeynep",
-      ),
+  // Full details (all images and variants) for the details page.
+  Future<Product> getProduct(int id) async {
+    final uri = Uri.parse('${Config.apiBase}/get_product.php?id=$id');
+    final res = await http.get(uri).timeout(const Duration(seconds: 15));
+    final data = jsonDecode(res.body);
 
-      Product("Formal shirt", 1199, "assets/images/formal_shirt.jpg", "Zeynep"),
-    ];
+    if (res.statusCode != 200 || data['ok'] != true) {
+      throw Exception(data['message'] ?? 'Could not load product');
+    }
+    return Product.fromJson(Map<String, dynamic>.from(data['product']));
   }
 }
