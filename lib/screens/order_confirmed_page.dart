@@ -89,8 +89,10 @@ class OrderConfirmedPage extends StatelessWidget {
                     const Divider(height: 22),
                     _buildRow(
                       "Payment Method",
-                      paymentMethod == 'bkash' ? "bKash" : "Cash on Delivery",
-                    ),
+paymentMethod.toLowerCase() == 'sslcommerz'
+    ? 'Online Payment'
+    : 'Cash on Delivery',
+                            ),
                     if (trxId != null && trxId!.isNotEmpty) ...[
                       const Divider(height: 22),
                       _buildRow("Transaction ID", trxId!),

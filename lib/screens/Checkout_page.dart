@@ -1,6 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:ecommerce_app/app_theme.dart';
-import 'package:ecommerce_app/bkash_payment.dart';
 import 'package:ecommerce_app/bloc/cart/cart_cubit.dart';
 import 'package:ecommerce_app/bloc/product/product_bloc.dart';
 import 'package:ecommerce_app/bloc/product/product_event.dart';
@@ -11,6 +11,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:http/http.dart' as http;
+import 'package:url_launcher/url_launcher.dart';
 
 class CheckoutPage extends StatefulWidget {
   const CheckoutPage({super.key});
@@ -24,19 +25,239 @@ class _CheckoutPageState extends State<CheckoutPage> {
   final phoneController = TextEditingController();
   final addressController = TextEditingController();
 
-  String selectedPaymentMethod = 'bkash';
+  String selectedPaymentMethod = 'sslcommerz';
   bool _isSubmitting = false;
 
   @override
   void initState() {
     super.initState();
-    // লগইন করা ইউজারের নাম থাকলে অটোমেটিক বসিয়ে দেওয়া
     final user = FirebaseAuth.instance.currentUser;
     if (user?.displayName != null && user!.displayName!.isNotEmpty) {
       nameController.text = user.displayName!;
     }
   }
 
+  /// ধাপ ১: SSLCommerz পেমেন্ট সেশন তৈরি ও গেটওয়ে ওপেন করা
+  Future<String?> _startSslCommerzPayment(double totalPrice) async {
+    final user = FirebaseAuth.instance.currentUser;
+    try {
+      final res = await http
+          .post(
+            Uri.parse('${Config.apiBase}/ssl_create_payment.php'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'amount': totalPrice,
+              'cus_name': nameController.text.trim(),
+              'cus_email': user?.email ?? 'customer@zeynep.com',
+              'cus_phone': phoneController.text.trim(),
+              'cus_add1': addressController.text.trim(),
+            }),
+          )
+          .timeout(const Duration(seconds: 20));
+
+      final data = jsonDecode(res.body);
+      if (res.statusCode == 200 &&
+          data['status'] == 'success' &&
+          data['gatewayURL'] != null) {
+        final String gatewayUrl = data['gatewayURL'];
+        final String tranId = data['tran_id'];
+
+        // নতুন ট্যাবে SSLCommerz গেটওয়ে ওপেন করা
+        final uri = Uri.parse(gatewayUrl);
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+
+        if (!mounted) return null;
+
+        // ইউজার পেমেন্ট শেষ করে ফিরে এলে ভেরিফাই করার ডায়ালগ
+        final bool? verified = await _showVerifyDialog(tranId);
+        if (verified == true) {
+          return tranId;
+        }
+        return null;
+      } else {
+        throw Exception(data['message'] ?? 'Could not initialize payment');
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Payment Error: $e'),
+            backgroundColor: AppColors.danger,
+          ),
+        );
+      }
+      return null;
+    }
+  }
+
+  /// পেমেন্ট ভেরিফিকেশন ডায়ালগ
+  /// পেমেন্ট ভেরিফিকেশন ডায়ালগ (অটোমেটিক + ম্যানুয়াল চেক)
+  Future<bool?> _showVerifyDialog(String tranId) {
+    bool isVerifying = false;
+    String? verifyError;
+    Timer? autoCheckTimer;
+    bool dialogClosed = false;
+
+    return showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            // প্রতি ৩ সেকেন্ড পরপর অটোমেটিক চেক করবে পেমেন্ট Paid হয়েছে কিনা
+            autoCheckTimer ??= Timer.periodic(const Duration(seconds: 3), (
+              timer,
+            ) async {
+              if (dialogClosed) {
+                timer.cancel();
+                return;
+              }
+              try {
+                final res = await http
+                    .post(
+                      Uri.parse('${Config.apiBase}/ssl_verify.php'),
+                      headers: {'Content-Type': 'application/json'},
+                      body: jsonEncode({'tran_id': tranId}),
+                    )
+                    .timeout(const Duration(seconds: 10));
+
+                final data = jsonDecode(res.body);
+                if (res.statusCode == 200 && data['ok'] == true) {
+                  timer.cancel();
+                  if (!dialogClosed && ctx.mounted) {
+                    dialogClosed = true;
+                    Navigator.pop(ctx, true);
+                  }
+                }
+              } catch (_) {}
+            });
+
+            return AlertDialog(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(18),
+              ),
+              title: const Row(
+                children: [
+                  Icon(Icons.lock_outline, color: AppColors.primary),
+                  SizedBox(width: 8),
+                  Text(
+                    'Waiting for Payment...',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+                  ),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Complete your payment in the opened browser tab and click "Back to Home Page". This screen will confirm automatically.',
+                    style: TextStyle(fontSize: 13.5, height: 1.4),
+                  ),
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 6,
+                    ),
+                    decoration: BoxDecoration(
+                      color: AppColors.background,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      'TXN ID: $tranId',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: AppColors.textMuted,
+                      ),
+                    ),
+                  ),
+                  if (verifyError != null) ...[
+                    const SizedBox(height: 10),
+                    Text(
+                      verifyError!,
+                      style: const TextStyle(
+                        color: AppColors.danger,
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: isVerifying
+                      ? null
+                      : () {
+                          dialogClosed = true;
+                          autoCheckTimer?.cancel();
+                          Navigator.pop(ctx, false);
+                        },
+                  child: const Text(
+                    'Cancel',
+                    style: TextStyle(color: AppColors.textMuted),
+                  ),
+                ),
+                ElevatedButton(
+                  onPressed: isVerifying
+                      ? null
+                      : () async {
+                          setDialogState(() {
+                            isVerifying = true;
+                            verifyError = null;
+                          });
+
+                          try {
+                            final res = await http
+                                .post(
+                                  Uri.parse('${Config.apiBase}/ssl_verify.php'),
+                                  headers: {'Content-Type': 'application/json'},
+                                  body: jsonEncode({'tran_id': tranId}),
+                                )
+                                .timeout(const Duration(seconds: 15));
+
+                            final data = jsonDecode(res.body);
+                            if (res.statusCode == 200 && data['ok'] == true) {
+                              dialogClosed = true;
+                              autoCheckTimer?.cancel();
+                              if (ctx.mounted) Navigator.pop(ctx, true);
+                            } else {
+                              setDialogState(() {
+                                isVerifying = false;
+                                verifyError =
+                                    data['message'] ??
+                                    'Payment not confirmed yet.';
+                              });
+                            }
+                          } catch (e) {
+                            setDialogState(() {
+                              isVerifying = false;
+                              verifyError = 'Verification error: $e';
+                            });
+                          }
+                        },
+                  child: isVerifying
+                      ? const SizedBox(
+                          height: 16,
+                          width: 16,
+                          child: CircularProgressIndicator(
+                            color: Colors.white,
+                            strokeWidth: 2,
+                          ),
+                        )
+                      : const Text('Verify Now'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// ধাপ ২: ডাটাবেসে অর্ডার সেভ করা
   Future<dynamic> _placeOrder(List<CartItem> cart, {String? trxID}) async {
     const url = "${Config.apiBase}/Place_Order.php";
     final userId = FirebaseAuth.instance.currentUser?.uid ?? '';
@@ -103,27 +324,13 @@ class _CheckoutPageState extends State<CheckoutPage> {
     setState(() => _isSubmitting = true);
 
     String? trxID;
-    if (selectedPaymentMethod == 'bkash') {
-      final paymentResult = await Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (context) =>
-              BkashPaymentScreen(amount: totalPrice.toStringAsFixed(0)),
-        ),
-      );
-
-      if (paymentResult == null || paymentResult['status'] != 'success') {
+    if (selectedPaymentMethod == 'sslcommerz') {
+      trxID = await _startSslCommerzPayment(totalPrice);
+      if (trxID == null) {
         if (!mounted) return;
         setState(() => _isSubmitting = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text("bKash Payment Failed or Cancelled!"),
-            backgroundColor: AppColors.danger,
-          ),
-        );
         return;
       }
-      trxID = paymentResult['trxID'];
     }
 
     final response = await _placeOrder(cart, trxID: trxID);
@@ -132,7 +339,6 @@ class _CheckoutPageState extends State<CheckoutPage> {
     setState(() => _isSubmitting = false);
 
     if (response['ok'] == true) {
-      // কার্ট খালি করা এবং হোম পেজের স্টক রিফ্রেশ করা
       context.read<CartCubit>().clearCart();
       context.read<ProductBloc>().add(LoadProduct());
 
@@ -241,11 +447,13 @@ class _CheckoutPageState extends State<CheckoutPage> {
                       RadioListTile<String>(
                         activeColor: AppColors.primary,
                         title: const Text(
-                          "bKash Payment",
+                          "Online Payment",
                           style: TextStyle(fontWeight: FontWeight.w600),
                         ),
-                        subtitle: const Text("Pay instantly via bKash"),
-                        value: "bkash",
+                        subtitle: const Text(
+                          "Pay via bKash, Nagad, Rocket, Visa/Mastercard",
+                        ),
+                        value: "sslcommerz",
                         groupValue: selectedPaymentMethod,
                         onChanged: (value) {
                           setState(() => selectedPaymentMethod = value!);
@@ -380,8 +588,8 @@ class _CheckoutPageState extends State<CheckoutPage> {
                           ),
                         )
                       : Text(
-                          selectedPaymentMethod == 'bkash'
-                              ? "Pay ৳${totalPrice.toStringAsFixed(0)} with bKash"
+                          selectedPaymentMethod == 'sslcommerz'
+                              ? "Pay ৳${totalPrice.toStringAsFixed(0)} Online"
                               : "Place Order (COD)",
                         ),
                 ),
